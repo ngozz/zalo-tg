@@ -1,4 +1,4 @@
-name: Sync Upstream & Build ARM Docker Image
+name: Sync Upstream & Build Multi-Arch Docker Image
 
 on:
   schedule:
@@ -40,7 +40,7 @@ jobs:
           if [ "$LOCAL_COMMIT" != "$UPSTREAM_COMMIT" ]; then
             echo "Updates found in upstream. Merging..."
             
-            # Merge upstream into your fork (acts as a fast-forward if you haven't made custom commits)
+            # Merge upstream into your fork
             git merge upstream/main --no-edit
             
             # Push changes to your fork
@@ -54,7 +54,6 @@ jobs:
 
   build-and-push:
     needs: sync
-    # This job only runs if the sync job found changes OR if you manually triggered it
     if: needs.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -76,12 +75,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push ARM64 Docker Image
+      - name: Build and push Multi-Arch Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/zalo-tg:latest
           cache-from: type=gha
