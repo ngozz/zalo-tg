@@ -1,4 +1,5 @@
 import { ThreadType, FriendEventType } from 'zca-js';
+import type { TelegramEmoji } from 'telegraf/types';
 import { createReadStream } from 'fs';
 import path from 'path';
 import QRCode from 'qrcode';
@@ -184,7 +185,7 @@ interface ZaloMuteEntry {
 }
 
 const MUTED_GROUPS_TTL = 60 * 1000; // 1 min
-let _mutedGroupsCache: { ids: Set<string>; ts: number } | null = null;
+let _mutedCache: { groups: Set<string>; peers: Set<string>; ts: number } | null = null;
 
 function isActiveMute(entry: ZaloMuteEntry): boolean {
   if (entry.duration === -1) return true;
@@ -195,27 +196,44 @@ function isActiveMute(entry: ZaloMuteEntry): boolean {
   return now < expiresAt;
 }
 
-async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
-  if (!config.zalo.skipMutedGroups) return false;
-
-  const cached = _mutedGroupsCache;
-  if (cached && Date.now() - cached.ts < MUTED_GROUPS_TTL) {
-    return cached.ids.has(groupId);
-  }
+/**
+ * Currently-muted Zalo thread ids, split into groups and DM peers, cached for a
+ * minute. getMute() returns `groupChatEntries` (groups) and `chatEntries` (DMs).
+ */
+async function getMutedZaloIds(api: ZaloAPI): Promise<{ groups: Set<string>; peers: Set<string> }> {
+  const cached = _mutedCache;
+  if (cached && Date.now() - cached.ts < MUTED_GROUPS_TTL) return cached;
 
   try {
-    const muteInfo = await api.getMute() as { groupChatEntries?: ZaloMuteEntry[] };
-    const mutedIds = new Set(
-      (muteInfo.groupChatEntries ?? [])
-        .filter(isActiveMute)
-        .map(entry => String(entry.id)),
-    );
-    _mutedGroupsCache = { ids: mutedIds, ts: Date.now() };
-    return mutedIds.has(groupId);
+    const muteInfo = await api.getMute() as {
+      groupChatEntries?: ZaloMuteEntry[];
+      chatEntries?: ZaloMuteEntry[];
+    };
+    const groups = new Set((muteInfo.groupChatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
+    const peers  = new Set((muteInfo.chatEntries ?? []).filter(isActiveMute).map(e => String(e.id)));
+    _mutedCache = { groups, peers, ts: Date.now() };
+    return _mutedCache;
   } catch (err) {
-    console.warn('[Zalo→TG] Failed to check muted Zalo groups; forwarding message:', err);
-    return false;
+    console.warn('[Zalo→TG] Failed to fetch Zalo mute state:', err);
+    return { groups: new Set(), peers: new Set() };
   }
+}
+
+/** Skip-muted-groups behavior (opt-in): drop messages from muted Zalo groups. */
+async function isMutedZaloGroup(api: ZaloAPI, groupId: string): Promise<boolean> {
+  if (!config.zalo.skipMutedGroups) return false;
+  return (await getMutedZaloIds(api)).groups.has(groupId);
+}
+
+/**
+ * Mirror Zalo's "mute notifications" onto Telegram: a thread muted on Zalo is
+ * delivered silently (disable_notification) — the message still arrives, it just
+ * doesn't ping. Covers both groups and DMs.
+ */
+async function isMutedOnZalo(api: ZaloAPI, threadId: string, type: 0 | 1): Promise<boolean> {
+  if (!config.zalo.muteSilentMirror) return false;
+  const { groups, peers } = await getMutedZaloIds(api);
+  return type === 1 ? groups.has(threadId) : peers.has(threadId);
 }
 
 // In-flight topic creation promises — prevents duplicate topic creation when
@@ -594,6 +612,10 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
         return;
       }
 
+      // Mirror Zalo's mute → deliver this thread silently on Telegram. Computed
+      // once here (before any message-type branch) so every send path can use it.
+      const silent = await isMutedOnZalo(api, zaloId, type);
+
       // Pre-populate member cache the first time we see a new group
       if (type === 1 && !_memberCacheLoaded.has(zaloId)) {
         _memberCacheLoaded.add(zaloId);
@@ -704,10 +726,12 @@ export async function setupZaloHandler(api: ZaloAPI): Promise<void> {
       const tgBase: {
         message_thread_id: number;
         reply_parameters?: { message_id: number; allow_sending_without_reply: boolean };
+        disable_notification?: boolean;
       } = { message_thread_id: topicId };
       if (tgReplyMsgId !== undefined) {
         tgBase.reply_parameters = { message_id: tgReplyMsgId, allow_sending_without_reply: true };
       }
+      if (silent) tgBase.disable_notification = true;
 
       const caption = groupCaption(bridgeSenderName);
       const tgOpts  = { ...tgBase, parse_mode: 'HTML' as const, caption };
@@ -881,7 +905,7 @@ ${escapeHtml(photoCaption)}`
                   const sentMsgs = await tg.sendMediaGroup(
                     config.telegram.groupId,
                     mediaItems,
-                    { message_thread_id: buf.topicId } as Parameters<typeof tg.sendMediaGroup>[2],
+                    { ...buf.tgBase, message_thread_id: buf.topicId } as Parameters<typeof tg.sendMediaGroup>[2],
                   );
                   // Save mapping for every photo so replying to ANY album photo
                   // produces a valid Zalo quote
@@ -1247,7 +1271,7 @@ ${escapeHtml(photoCaption)}`
           const tgScoreMsg = await tg.sendMessage(
             config.telegram.groupId,
             scoreText,
-            { message_thread_id: topicId, parse_mode: 'HTML' },
+            { message_thread_id: topicId, parse_mode: 'HTML', disable_notification: silent },
           );
 
           pollStore.save({
@@ -1471,6 +1495,7 @@ ${escapeHtml(photoCaption)}`
               {
                 message_thread_id: topicId,
                 parse_mode: 'HTML',
+                disable_notification: silent,
               },
             );
             continue;
@@ -1483,6 +1508,7 @@ ${escapeHtml(photoCaption)}`
               message_thread_id: topicId,
               parse_mode: 'HTML',
               reply_parameters: { message_id: tgMsgId, allow_sending_without_reply: true },
+              disable_notification: silent,
             },
           );
           console.log(`[ZaloHandler] chat.delete: notified TG msg ${tgMsgId} deleted by ${delActorName} (${delActorUid})`);
@@ -1619,6 +1645,33 @@ ${escapeHtml(photoCaption)}`
     '':          '❌',  // remove reaction
   };
 
+  // Map a Zalo reaction icon → the closest emoji Telegram actually allows as a
+  // *reaction* (Telegram restricts reactions to a fixed set, narrower than
+  // arbitrary emoji). Icons without an entry here can't be shown as a native
+  // Telegram reaction and fall back to the summary-reply method.
+  const ZALO_TO_TG_REACTION: Record<string, TelegramEmoji> = {
+    '/-heart':  '❤',  // HEART
+    '/-strong': '👍',  // LIKE
+    ':>':       '😁',  // HAHA
+    ':o':       '🤯',  // WOW
+    ':-((':     '😢',  // CRY
+    ':((':      '😭',  // VERY_SAD
+    '--b':      '😢',  // SAD
+    ':-h':      '😡',  // ANGRY
+    ':-*':      '😘',  // KISS
+    ';xx':      '🥰',  // LOVE
+    ":')":      '🤣',  // TEARS_OF_JOY
+    '/-shit':   '💩',  // SHIT
+    '/-break':  '💔',  // BROKEN_HEART
+    '/-weak':   '👎',  // DISLIKE
+    ';-/':      '🤔',  // CONFUSED
+    '/-ok':     '👌',  // OK
+    '_()_':     '🙏',  // PRAY
+    '/-thanks': '🙏',  // THANKS
+    '/-bd':     '🎉',  // BIRTHDAY
+    'x-)':      '😎',  // (cool)
+  };
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api.listener.on('reaction', async (reaction: any) => {
     try {
@@ -1673,6 +1726,30 @@ ${escapeHtml(photoCaption)}`
       const type   = (reaction?.isGroup ? 1 : 0) as 0 | 1;
       const topicId = store.getTopicByZalo(zaloId, type);
       if (topicId === undefined) return;
+
+      // In 1-1 DMs, attach the reaction directly onto the Telegram message
+      // (clean, no reply) — there's only one possible reactor, so no name is
+      // needed. A bot reaction shows as the bot and Telegram can only hold one
+      // reaction per message, which is fine for a single peer but would collapse
+      // distinct reactions in a group; so groups always fall through to the
+      // named summary reply below, which can tell multiple reactors apart.
+      // The bot's own reactions don't generate message_reaction updates, so this
+      // can't echo back to Zalo. Unmappable/rejected icons also fall through.
+      const tgReaction = ZALO_TO_TG_REACTION[rIcon];
+      if (type === 0 && tgReaction) {
+        try {
+          await tg.setMessageReaction(
+            config.telegram.groupId,
+            tgMsgId,
+            [{ type: 'emoji', emoji: tgReaction }],
+          );
+          return; // shown natively on the message — no reply message
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          console.warn(`[ZaloHandler] Native reaction "${tgReaction}" rejected, using summary reply: ${m}`);
+          // fall through to the named summary reply
+        }
+      }
 
       const actorName = rawName || await resolveUserDisplayName(api, actorUid || undefined, 'ai đó');
 
@@ -1966,6 +2043,83 @@ ${escapeHtml(photoCaption)}`
       console.log(`[ZaloHandler] FriendEvent REQUEST from ${fromUid} (${displayName})`);
     } catch (err) {
       console.error('[ZaloHandler] FriendEvent error:', err);
+    }
+  });
+
+  // ── Typing indicator (đang soạn tin) ───────────────────────────────────────
+  // Zalo fires `typing` repeatedly (every ~1s) while someone is composing.
+  // We mirror it into the matching Telegram topic via sendChatAction, whose
+  // "typing" status auto-clears after ~5s — so we only need to refresh it
+  // occasionally. Throttle per-thread to avoid hammering the Telegram API.
+  //
+  // Direction is Zalo→Telegram only: this handler never sends anything back to
+  // Zalo, so it adds zero outbound traffic and no account-ban risk.
+  const TYPING_THROTTLE_MS = 4000;
+  const lastTypingForwardedAt = new Map<string, number>();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  api.listener.on('typing', async (typing: any) => {
+    try {
+      const zaloId = String(typing?.threadId ?? typing?.data?.gid ?? typing?.data?.uid ?? '');
+      if (!zaloId) return;
+
+      const type = (typing?.type === ThreadType.Group || typing?.data?.gid) ? 1 : 0;
+      const topicId = store.getTopicByZalo(zaloId, type as 0 | 1);
+      if (topicId === undefined) return; // only surface typing for known conversations
+
+      const now = Date.now();
+      if (now - (lastTypingForwardedAt.get(zaloId) ?? 0) < TYPING_THROTTLE_MS) return;
+      lastTypingForwardedAt.set(zaloId, now);
+
+      await tg.sendChatAction(config.telegram.groupId, 'typing', { message_thread_id: topicId });
+    } catch (err) {
+      console.warn('[ZaloHandler] Typing error:', err);
+    }
+  });
+
+  // ── Seen indicator (đã xem) ────────────────────────────────────────────────
+  // When the other side reads a message we sent from Telegram, Zalo emits
+  // `seen_messages`. We mark the corresponding Telegram message with a 👀
+  // reaction so the user can tell their message was read — mirroring Zalo's
+  // "Đã xem". Each Telegram message is marked at most once.
+  //
+  // Direction is Zalo→Telegram only (read-only on the Zalo side).
+  const SEEN_DEDUPE_MAX = 2000;
+  const seenMarkedTgMsgIds = new Set<number>();
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  api.listener.on('seen_messages', async (messages: any[]) => {
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    for (const m of messages) {
+      try {
+        const data = m?.data ?? {};
+        // Resolve the Zalo message id the peer just read, then map it back to
+        // the Telegram message that originated it.
+        const candidates = [data.msgId, data.realMsgId]
+          .map((id: unknown) => (id === undefined || id === null ? '' : String(id).trim()))
+          .filter((id: string) => id && id !== '0');
+
+        let tgMsgId: number | undefined;
+        for (const id of candidates) {
+          tgMsgId = sentMsgStore.getByZaloMsgId(id) ?? msgStore.getTgMsgId(id);
+          if (tgMsgId !== undefined) break;
+        }
+        if (tgMsgId === undefined || seenMarkedTgMsgIds.has(tgMsgId)) continue;
+
+        // Bound the dedupe set so it can't grow without limit.
+        if (seenMarkedTgMsgIds.size >= SEEN_DEDUPE_MAX) {
+          seenMarkedTgMsgIds.clear();
+        }
+        seenMarkedTgMsgIds.add(tgMsgId);
+
+        await tg.setMessageReaction(
+          config.telegram.groupId,
+          tgMsgId,
+          [{ type: 'emoji', emoji: '👀' }],
+        );
+      } catch (err) {
+        console.warn('[ZaloHandler] Seen error:', err);
+      }
     }
   });
 }
