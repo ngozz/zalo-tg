@@ -5,11 +5,18 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import os from 'os';
+import { config } from '../config.js';
 
-const TMP_DIR = path.join(os.tmpdir(), 'zalo-tg');
+// Local Bot API reads outgoing files from a shared host/container path.
+// macOS os.tmpdir() points to /var/folders, while our server and Docker setup
+// share /tmp, so keep bridge media there whenever local mode is enabled.
+const TMP_ROOT = config.telegram.localServer && process.platform !== 'win32'
+  ? '/tmp'
+  : os.tmpdir();
+const TMP_DIR = path.join(TMP_ROOT, 'zalo-tg');
 
 /** Keep readable Unicode filenames, but remove path/control chars unsafe on disk. */
-function sanitizeFileName(fileName: string, fallback = `download_${Date.now()}`): string {
+export function sanitizeFileName(fileName: string, fallback = `download_${Date.now()}`): string {
   const cleaned = fileName
     .normalize('NFC')
     .replace(/[\\/:*?"<>|\u0000-\u001F]/g, '_')
@@ -33,8 +40,8 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
     const baseName = sanitizeFileName(fileName ?? path.basename(srcPath));
     const destPath = path.join(TMP_DIR, `${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${baseName}`);
     copyFileSync(srcPath, destPath);
-    // Delete the original from local server's data dir — it's been delivered, no longer needed
-    await unlink(srcPath).catch(() => undefined);
+    // The source belongs to telegram-bot-api's cache. Never delete it here;
+    // cleanTemp() only removes the bridge-owned destination copy.
     return destPath;
   }
 
@@ -85,6 +92,18 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
 /** Remove a temp file, ignoring errors. */
 export async function cleanTemp(filePath: string): Promise<void> {
   try { await unlink(filePath); } catch { /* ignore */ }
+}
+
+/** Split Telegram album payloads without ever producing an invalid >10 batch. */
+export function telegramMediaBatches<T>(items: T[], maxBatchSize = 10): T[][] {
+  if (!Number.isInteger(maxBatchSize) || maxBatchSize < 2) {
+    throw new Error('maxBatchSize must be an integer >= 2');
+  }
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += maxBatchSize) {
+    batches.push(items.slice(i, i + maxBatchSize));
+  }
+  return batches;
 }
 
 /**
