@@ -53,7 +53,12 @@ jobs:
             # 4. Check if there is still anything left to commit (in case upstream ONLY updated workflows)
             if git diff --staged --quiet; then
               echo "Only workflow changes were found from upstream. Aborting merge."
-              git merge --abort
+              # Only abort if a merge is actually in progress (MERGE_HEAD exists)
+              if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                git merge --abort
+              else
+                echo "No merge in progress; nothing to abort."
+              fi
               echo "updated=false" >> $GITHUB_OUTPUT
             else
               # 5. Complete the merge commit and push
