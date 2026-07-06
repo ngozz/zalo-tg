@@ -86,24 +86,41 @@ cp .env.example .env # nếu checkout có file này; nếu không thì tự tạ
 npm run dev
 ```
 
-`.env` tối thiểu:
+Các biến `.env` bắt buộc:
 
 ```env
 TG_TOKEN=123456:telegram-bot-token
 TG_GROUP_ID=-1001234567890
-
-# Đường dẫn tuỳ chọn
-DATA_DIR=./data
-ZALO_CREDENTIALS_PATH=./credentials.json
-
-# Telegram Local Bot API tuỳ chọn
-LOCAL_BOT_API=0
-TG_LOCAL_SERVER=http://127.0.0.1:8081
-
-# Hành vi Zalo tuỳ chọn
-ZALO_SKIP_MUTED_GROUPS=0
-ZALO_MUTE_SILENT=1
 ```
+
+Copy [.env.example](.env.example) để có template đầy đủ. Bảng config đầy đủ:
+
+| Biến | Mặc định / ví dụ | Nơi dùng | Công dụng |
+| --- | --- | --- | --- |
+| `TG_TOKEN` | bắt buộc | app | Telegram bot token lấy từ @BotFather. |
+| `TG_GROUP_ID` | bắt buộc, ví dụ `-1001234567890` | app | ID Telegram supergroup/forum. Phải là số âm; bot phải là admin và group phải bật Topics. |
+| `DATA_DIR` | `./data` | app | Thư mục lưu topic map, message map, user cache, poll và auto-reply state. |
+| `ZALO_CREDENTIALS_PATH` | `./credentials.json` | app | File credentials Zalo được ghi sau QR login. Không commit file này. |
+| `ZALO_SKIP_MUTED_GROUPS` | `0` | app | `1` bỏ qua hoàn toàn tin từ nhóm Zalo đã mute. |
+| `ZALO_MUTE_SILENT` | `1` | app | `1` mirror thread Zalo đã mute thành tin Telegram silent; `0` luôn notify. |
+| `LOCAL_BOT_API` | `0` | app | `1` gửi request Telegram Bot API qua `TG_LOCAL_SERVER`; `0` dùng official `api.telegram.org`. |
+| `TG_LOCAL_SERVER` | `http://127.0.0.1:8081` | app / Compose override | Endpoint Local Bot API. Chỉ bắt buộc khi `LOCAL_BOT_API=1`; Compose override thành `http://telegram-bot-api:8081`. |
+| `TG_API_ID` | rỗng | Docker Compose | Telegram API ID cho container `telegram-bot-api`; lấy tại my.telegram.org. |
+| `TG_API_HASH` | rỗng | Docker Compose | Telegram API hash cho container `telegram-bot-api`. |
+| `TG_LOCAL_PORT` | `8081` | Docker Compose | Port host expose cho Local Bot API service. |
+| `ZALO_TG_SHARED_TMP_ROOT` | tự động | app | Root temp dùng chung cho file path mà bridge và Local Bot API đều phải thấy. Mặc định là `/tmp` khi bật local mode trên POSIX, còn lại dùng temp của OS. |
+| `ZALO_TG_RUNNER` | unset | app / Compose | Chỉ set `1` khi có supervisor ngoài restart process theo exit code update/restart. Không set `0`; để unset. |
+| `NODE_ENV` | Docker set `production` | Docker / Node | Runtime mode; thường để Docker quản lý. |
+| `ZALO_TG_TUI` | bật | app | `0` tắt live TUI/dashboard và in log thường. |
+| `ZALO_TG_TUI_ENGINE` | tự động | app | `ansi` ép dùng dashboard ANSI TypeScript cũ thay vì sidecar Go. |
+| `ZALO_TG_TUI_MOUSE` | bật | app | Dùng `0`, `false`, `off`, `no` hoặc `native` để giữ native mouse selection của terminal. |
+| `ZALO_TG_TUI_BIN` | auto-detect `bin/zalo-tg-tui` | app | Path tuỳ chỉnh tới binary Go TUI sidecar. |
+| `ZALO_TG_TUI_DUMP_ON_EXIT` | bật | app | `0` tắt dump các dòng activity cuối khi sidecar thoát sớm. |
+| `ZALO_TG_NO_ANIMATION` | unset | app | `1` tắt animation startup/shutdown trong terminal. |
+| `NO_COLOR` | unset | app / convention terminal | Có giá trị bất kỳ thì tắt màu dashboard. |
+| `TERM` | terminal tự set | app / convention terminal | `TERM=dumb` tắt dashboard interactive. Thường không cần set tay. |
+| `ZALO_TG_INSTALL_DIR` | `~/zalo-tg` | chỉ installer | Thư mục checkout khi chạy `curl | sh`; export trước khi chạy `install.sh`. |
+| `ZALO_TG_REPO` | repo GitHub này | chỉ installer | URL repo mà `install.sh` clone; export trước khi chạy installer. |
 
 Sau khi bot chạy, gửi `/login` trong group Telegram hoặc nhắn riêng với bot. Quét QR bằng Zalo. Khi đăng nhập thành công, bridge bắt đầu listen và tự tạo topic khi có hội thoại xuất hiện.
 
