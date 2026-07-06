@@ -337,17 +337,18 @@ func (m model) renderToast(width int) string {
 	if remaining < 10 {
 		alpha = float64(remaining) / 10.0
 	}
-	msgColor := interpolateColor(string(p.green), string(p.muted), 1.0-alpha)
-	icon := lipgloss.NewStyle().Foreground(lipgloss.Color(msgColor)).Render("● ")
-	text := lipgloss.NewStyle().Foreground(lipgloss.Color(msgColor)).Bold(true).Render(m.toast)
-	content := icon + text
+	accentColor := interpolateColor(string(p.cyan), string(p.muted), 1.0-alpha)
+	accentBar := lipgloss.NewStyle().Foreground(lipgloss.Color(accentColor)).Render("▎")
+	text := lipgloss.NewStyle().Foreground(lipgloss.Color(accentColor)).Bold(true).Render(m.toast)
 
 	box := lipgloss.NewStyle().
-		Background(p.elevated).
-		Padding(0, 2).
-		Render(content)
+		Background(p.surfaceAlt).
+		Padding(0, 1).
+		Render(accentBar + " " + text)
 
-	return ui.footer.Width(width).Render(box)
+	return ui.footer.Width(width).Render(
+		lipgloss.PlaceHorizontal(width, lipgloss.Right, box),
+	)
 }
 
 func (m model) renderFooter(width int) string {
