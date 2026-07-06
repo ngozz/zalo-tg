@@ -123,32 +123,33 @@ header() {
   if [ -t 1 ]; then
     printf '\033[2J\033[H'
   fi
-  printf '%s\n' "${DIM}$(line "─")${RESET}"
-  printf '  %s●%s %s%s%s %s/%s installer %s%s%s\n' \
-    "$GREEN" "$RESET" "$BOLD" "$APP_NAME" "$RESET" "$DIM" "$RESET" "$DIM" "v$APP_VERSION" "$RESET"
-  printf '  %sZalo ⇄ Telegram bridge setup%s\n' "$DIM" "$RESET"
-  printf '%s\n\n' "${DIM}$(line "─")${RESET}"
+  printf '%s\n' "${DIM}$(line "━")${RESET}"
+  printf '  %s┌─%s %s%s%s  %s● %s%s%s\n' \
+    "$DIM" "$RESET" "$BOLD" "$APP_NAME" "$RESET" "$GREEN" "$RESET" "$DIM" "v$APP_VERSION" "$RESET"
+  printf '  %s│%s %sZalo ⇄ Telegram bridge%s\n' "$DIM" "$RESET" "$CYAN" "$RESET"
+  printf '  %s└─%s %ssetup wizard%s\n' "$DIM" "$RESET" "$DIM" "$RESET"
+  printf '%s\n\n' "${DIM}$(line "━")${RESET}"
 }
 
 section() {
-  printf '\n%s%s%s\n' "$BOLD" "$1" "$RESET"
-  printf '%s\n' "${DIM}$(line "·")${RESET}"
+  printf '\n  %s▸%s %s%s%s\n' "$CYAN" "$RESET" "$BOLD" "$1" "$RESET"
+  printf '  %s\n' "${DIM}$(line "─")${RESET}"
 }
 
 note() {
-  printf '  %s◆%s %s\n' "$CYAN" "$RESET" "$1"
+  printf '  %sℹ%s %s\n' "$CYAN" "$RESET" "$1"
 }
 
 ok() {
-  printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"
+  printf '  %s✔%s %s\n' "$GREEN" "$RESET" "$1"
 }
 
 warn() {
-  printf '  %s▲%s %s\n' "$YELLOW" "$RESET" "$1"
+  printf '  %s⚠%s %s\n' "$YELLOW" "$RESET" "$1"
 }
 
 fail() {
-  printf '  %s×%s %s\n' "$RED" "$RESET" "$1" >&2
+  printf '  %s✘%s %s\n' "$RED" "$RESET" "$1" >&2
 }
 
 need_cmd() {
@@ -222,7 +223,7 @@ read_prompt() {
 confirm() {
   prompt=$1
   default=${2:-Y}
-  printf '  %s◆%s %s %sauto:%s %s%s%s\n' "$MAGENTA" "$RESET" "$prompt" "$DIM" "$RESET" "$BOLD" "$default" "$RESET"
+  printf '  %s?%s %s %s[%s]%s\n' "$MAGENTA" "$RESET" "$prompt" "$DIM" "$default" "$RESET"
   case "$default" in
     y|Y|yes|YES) return 0 ;;
     *) return 1 ;;
@@ -236,9 +237,9 @@ ask_env_value() {
 
   if ! can_prompt; then
     if [ -n "$default" ]; then
-      printf '  %s?%s %s %s[%s]%s\n' "$MAGENTA" "$RESET" "$label" "$DIM" "$default" "$RESET" >&2
+      printf '  %s✎%s %s %s[%s]%s\n' "$MAGENTA" "$RESET" "$label" "$DIM" "$default" "$RESET" >&2
     else
-      printf '  %s?%s %s %s[blank]%s\n' "$MAGENTA" "$RESET" "$label" "$DIM" "$RESET" >&2
+      printf '  %s✎%s %s %s[blank]%s\n' "$MAGENTA" "$RESET" "$label" "$DIM" "$RESET" >&2
     fi
     printf '%s\n' "$default"
     return 0
@@ -246,9 +247,9 @@ ask_env_value() {
 
   while :; do
     if [ -n "$default" ]; then
-      printf '  %s?%s %s %s[%s]%s ' "$MAGENTA" "$RESET" "$label" "$DIM" "$default" "$RESET" >&2
+      printf '  %s✎%s %s %s[%s]%s ' "$MAGENTA" "$RESET" "$label" "$DIM" "$default" "$RESET" >&2
     else
-      printf '  %s?%s %s %s[blank]%s ' "$MAGENTA" "$RESET" "$label" "$DIM" "$RESET" >&2
+      printf '  %s✎%s %s %s[blank]%s ' "$MAGENTA" "$RESET" "$label" "$DIM" "$RESET" >&2
     fi
     read_prompt
     [ -n "$ans" ] || ans=$default
@@ -378,7 +379,7 @@ configure_env() {
 
   section "Configuration"
   note "Press Enter to accept a default. Blank optional values stay commented."
-  note "Telegram values can also be passed as TG_TOKEN/TG_GROUP_ID before running."
+  note "Telegram values can also be passed as TG_TOKEN/TG_GROUP_ID env vars."
 
   ENV_TG_TOKEN_DEFAULT=${TG_TOKEN:-}
   ENV_TG_GROUP_ID_DEFAULT=${TG_GROUP_ID:-}
@@ -387,20 +388,20 @@ configure_env() {
     [ -n "$ENV_TG_GROUP_ID_DEFAULT" ] || ENV_TG_GROUP_ID_DEFAULT="-1001234567890"
   fi
 
-  printf '\n  %sTelegram%s\n' "$BOLD" "$RESET"
+  printf '\n  %s▸ Telegram%s\n' "$CYAN" "$RESET"
   ENV_TG_TOKEN=$(ask_env_value "TG_TOKEN - bot token from @BotFather" "$ENV_TG_TOKEN_DEFAULT" 1)
   ENV_TG_GROUP_ID=$(ask_env_value "TG_GROUP_ID - forum supergroup ID" "$ENV_TG_GROUP_ID_DEFAULT" 1)
 
-  printf '\n  %sStorage%s\n' "$BOLD" "$RESET"
+  printf '\n  %s▸ Storage%s\n' "$CYAN" "$RESET"
   ENV_DATA_DIR=$(ask_env_value "DATA_DIR - persistent data directory" "${DATA_DIR:-./data}" 0)
   ENV_ZALO_CREDENTIALS_PATH=$(ask_env_value "ZALO_CREDENTIALS_PATH - Zalo credentials file" "${ZALO_CREDENTIALS_PATH:-./credentials.json}" 0)
   ENV_ZALO_TG_SHARED_TMP_ROOT=$(ask_env_value "ZALO_TG_SHARED_TMP_ROOT - shared temp root, blank = auto" "${ZALO_TG_SHARED_TMP_ROOT:-}" 0)
 
-  printf '\n  %sZalo behavior%s\n' "$BOLD" "$RESET"
+  printf '\n  %s▸ Zalo behavior%s\n' "$CYAN" "$RESET"
   ENV_ZALO_SKIP_MUTED_GROUPS=$(ask_env_value "ZALO_SKIP_MUTED_GROUPS - 1 skip muted groups, 0 mirror them" "${ZALO_SKIP_MUTED_GROUPS:-0}" 0)
   ENV_ZALO_MUTE_SILENT=$(ask_env_value "ZALO_MUTE_SILENT - 1 mirror muted threads silently" "${ZALO_MUTE_SILENT:-1}" 0)
 
-  printf '\n  %sTelegram Local Bot API%s\n' "$BOLD" "$RESET"
+  printf '\n  %s▸ Telegram Local Bot API%s\n' "$CYAN" "$RESET"
   ENV_LOCAL_BOT_API=$(ask_env_value "LOCAL_BOT_API - 1 use local server, 0 official API" "${LOCAL_BOT_API:-0}" 0)
   ENV_TG_LOCAL_SERVER=$(ask_env_value "TG_LOCAL_SERVER - local Bot API URL" "${TG_LOCAL_SERVER:-http://127.0.0.1:8081}" 0)
   ENV_TG_API_ID=$(ask_env_value "TG_API_ID - my.telegram.org API ID, blank if unused" "${TG_API_ID:-}" 0)
@@ -408,11 +409,11 @@ configure_env() {
   ENV_TG_LOCAL_PORT=$(ask_env_value "TG_LOCAL_PORT - Docker Compose host port" "${TG_LOCAL_PORT:-8081}" 0)
   ENV_TGBOTAPI_DATA_DIR=$(ask_env_value "TGBOTAPI_DATA_DIR - start-local-api.sh data dir, blank = default" "${TGBOTAPI_DATA_DIR:-}" 0)
 
-  printf '\n  %sRuntime%s\n' "$BOLD" "$RESET"
+  printf '\n  %s▸ Runtime%s\n' "$CYAN" "$RESET"
   ENV_ZALO_TG_RUNNER=$(ask_env_value "ZALO_TG_RUNNER - 1 only under external supervisor, blank normally" "${ZALO_TG_RUNNER:-}" 0)
   ENV_NODE_ENV=$(ask_env_value "NODE_ENV - blank normally, production in Docker" "${NODE_ENV:-}" 0)
 
-  printf '\n  %sTerminal UI%s\n' "$BOLD" "$RESET"
+  printf '\n  %s▸ Terminal UI%s\n' "$CYAN" "$RESET"
   ENV_ZALO_TG_TUI=$(ask_env_value "ZALO_TG_TUI - 0 disable dashboard, blank = enabled" "${ZALO_TG_TUI:-}" 0)
   ENV_ZALO_TG_TUI_ENGINE=$(ask_env_value "ZALO_TG_TUI_ENGINE - ansi for legacy dashboard, blank = auto" "${ZALO_TG_TUI_ENGINE:-}" 0)
   ENV_ZALO_TG_TUI_MOUSE=$(ask_env_value "ZALO_TG_TUI_MOUSE - native/0 keeps terminal mouse, blank = app mouse" "${ZALO_TG_TUI_MOUSE:-}" 0)
@@ -452,7 +453,7 @@ has_npm_script() {
 run_cmd() {
   title=$1
   shift
-  printf '  %s…%s %s\n' "$BLUE" "$RESET" "$title"
+  printf '  %s→%s %s\n' "$BLUE" "$RESET" "$title"
   printf '    %s$ %s%s\n' "$DIM" "$*" "$RESET"
   if [ "$DRY_RUN" -eq 1 ]; then
     ok "dry-run: skipped"
@@ -463,9 +464,9 @@ run_cmd() {
     return 0
   fi
   fail "$title failed"
-  printf '%s\n' "${DIM}$(line "─")${RESET}" >&2
+  printf '%s\n' "${DIM}$(line "━")${RESET}" >&2
   sed -n '1,160p' "$LOG_FILE" >&2
-  printf '%s\n' "${DIM}$(line "─")${RESET}" >&2
+  printf '%s\n' "${DIM}$(line "━")${RESET}" >&2
   exit 1
 }
 
@@ -681,15 +682,22 @@ if [ "$RUN_CHECK" -eq 1 ]; then
   run_cmd "Run full check" npm run check
 fi
 
-section "Done"
+printf '\n%s\n' "${GREEN}$(line "━")${RESET}"
+printf '  %s✦%s %s%s installed successfully%s %s✦%s\n' \
+  "$YELLOW" "$RESET" "$BOLD" "$APP_NAME" "$RESET" "$YELLOW" "$RESET"
+printf '%s\n\n' "${GREEN}$(line "━")${RESET}"
 
-ok "Installation complete"
-note "Edit .env with TG_TOKEN and TG_GROUP_ID before starting."
-note "Start development mode: ${BOLD}npm run dev${RESET}"
-note "Build the TUI again later: ${BOLD}npm run tui:build${RESET}"
+printf '  %s▸%s Edit %s.env%s with your %sTG_TOKEN%s and %sTG_GROUP_ID%s\n' \
+  "$CYAN" "$RESET" "$BOLD" "$RESET" "$YELLOW" "$RESET" "$YELLOW" "$RESET"
+printf '  %s▸%s Start: %s%s npm run dev%s\n' \
+  "$CYAN" "$RESET" "$DIM" "$RESET" "$BOLD" "$RESET"
+printf '  %s▸%s Rebuild TUI: %s%s npm run tui:build%s\n' \
+  "$CYAN" "$RESET" "$DIM" "$RESET" "$BOLD" "$RESET"
 
 if grep -q '^LOCAL_BOT_API=1' .env 2>/dev/null; then
-  warn "LOCAL_BOT_API=1 detected. Start it with: docker compose up -d telegram-bot-api"
+  printf '\n'
+  printf '  %s▸%s %sLocal Bot API:%s %sdocker compose up -d telegram-bot-api%s\n' \
+    "$YELLOW" "$RESET" "$BOLD" "$RESET" "$DIM" "$RESET"
 fi
 
 printf '\n%s\n' "${DIM}$(line "─")${RESET}"
