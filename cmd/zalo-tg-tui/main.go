@@ -73,7 +73,6 @@ func main() {
 		mouse:         mouseCaptureEnabled(),
 		markdownFor:   map[int]string{},
 		eventCount:    0,
-		startupFrames: startupFrameCount,
 	}
 
 	options := []tea.ProgramOption{

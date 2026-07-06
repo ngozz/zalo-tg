@@ -183,17 +183,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.state.Events) == 0 {
 			m.state.Events = prevEvents
 		}
-		if m.startupFrames > 0 && m.startupFrames <= startupFrameCount-12 && env.Event != nil {
-			m.startupFrames = 0
-			m.layout()
-		}
 		if env.Event != nil {
 			m.eventCount++
 		}
 		if env.State.Phase != "" {
 			m.phase = env.State.Phase
 		}
-		if !m.selectMode && m.startupFrames == 0 {
+		if !m.selectMode {
 			m.layout()
 			if wasLive {
 				m.activity.GotoBottom()
@@ -223,12 +219,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.frame++
-		if m.startupFrames > 0 {
-			m.startupFrames--
-			if m.startupFrames == 0 {
-				m.layout()
-			}
-		}
 		if m.toast != "" {
 			m.toastFrame++
 			if m.toastFrame >= m.toastTotal {

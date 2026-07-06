@@ -52,7 +52,6 @@ const (
 )
 
 const animFPS = 12
-const startupFrameCount = 48
 
 type model struct {
 	scanner *bufio.Scanner
@@ -83,7 +82,6 @@ type model struct {
 
 	eventCount   int
 	phase        string
-	startupFrames int
 
 	toast      string
 	toastFrame int
