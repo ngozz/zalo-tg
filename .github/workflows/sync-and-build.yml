@@ -44,7 +44,7 @@ jobs:
             git merge upstream/main --no-commit --no-ff || true
             
             # 2. Revert the workflows directory back to our local version (HEAD)
-            git restore --staged .github/workflows/ || true
+            git reset HEAD .github/workflows/ || true
             git checkout HEAD -- .github/workflows/ || true
             
             # 3. Clean up any brand-new workflow files upstream might have added
