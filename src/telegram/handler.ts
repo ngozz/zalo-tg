@@ -50,7 +50,10 @@ import { cancelActiveAppLogin, triggerAppLogin } from '../zalo/loginApp.js';
 import { loadAppSession, invalidateAppSession, appGetReceivedFriendRequests, appGetSentFriendRequests, appGetGroupInfo, appGetGroupMembersInfo } from '../zalo/appApi.js';
 import { resetMemberCacheLoaded } from '../zalo/handler.js';
 import { escapeHtml } from '../utils/format.js';
+import { zaloApiWithRetry, isTransientNetworkError } from '../utils/zaloRetry.js';
+import { tgQueue } from '../utils/tgQueue.js';
 import { requestShutdown } from '../lifecycle.js';
+import { startSetupWizard, handleSetupCallback, hasActiveSetup, consumeSetupTextAndAdvance } from './setupWizard.js';
 
 // Bridge start time (module load = process start)
 const _bridgeStartTime = Date.now();
@@ -311,18 +314,29 @@ async function sendQrPhoto(
   };
 
   if (config.telegram.localServer) {
-    // telegram-bot-api --local expects a file URI. A bare absolute path is
-    // parsed as an HTTP URL and rejected with "URL host is empty".
-    await tgBot.telegram.sendPhoto(chatId, pathToFileURL(imagePath).toString(), options);
-    return;
+    try {
+      // telegram-bot-api --local expects a file URI. A bare absolute path is
+      // parsed as an HTTP URL and rejected with "URL host is empty".
+      // tgQueue retries transient network errors (socket hang up, ETIMEDOUT…).
+      await tgQueue(() => tgBot.telegram.sendPhoto(chatId, pathToFileURL(imagePath).toString(), options));
+      return;
+    } catch (err: any) {
+      const description = err?.response?.description ?? err?.message ?? '';
+      const isLocalFileError = err?.response?.error_code === 400
+        && /(file:\/\/|http url|url host|wrong file|failed to get.*url|file.*not found|can't open|unsupported.*protocol)/i.test(description);
+      if (!isLocalFileError) throw err;
+      console.warn(`[Telegram] QR delivery: local URI rejected (${description}); retrying multipart`);
+    }
   }
 
   const image = await readFile(imagePath);
-  await tgBot.telegram.sendPhoto(
+  // tgQueue retries transient network errors so a brief hiccup no longer
+  // aborts the whole QR login flow (issue #66).
+  await tgQueue(() => tgBot.telegram.sendPhoto(
     chatId,
     { source: image, filename: 'zalo-qr.png' },
     options,
-  );
+  ));
 }
 
 /**
@@ -530,6 +544,28 @@ export function setupTelegramHandler(
         },
       },
     );
+  });
+
+  // /setup – interactive env wizard (bool via inline buttons, free-form via chat input)
+  tgBot.command('setup', async (ctx) => {
+    if (ctx.chat.id !== config.telegram.groupId) return;
+    const threadId = 'message_thread_id' in ctx.message
+      ? ctx.message.message_thread_id
+      : undefined;
+    const replyOpts = threadId ? { message_thread_id: threadId } : {};
+    if (!await isTelegramGroupAdmin(ctx.from.id)) {
+      await ctx.reply('⛔ Chỉ admin Telegram mới có thể cấu hình bridge.', replyOpts);
+      return;
+    }
+    if (hasActiveSetup(ctx.from.id)) {
+      await ctx.reply('⚙️ Đang có phiên cấu hình — hoàn tất nó trước (hoặc bấm Huỷ).', replyOpts);
+      return;
+    }
+    await ctx.reply(
+      '⚙️ Bắt đầu cấu hình bridge. Trả lời từng bước — các biến boolean dùng nút bấm, các biến khác nhập tin nhắn trong nhóm.',
+      replyOpts,
+    );
+    startSetupWizard(ctx.from.id, threadId, (text, opts) => ctx.reply(text, { ...replyOpts, ...opts }));
   });
 
   // /topic – manage bridge topic mappings
@@ -1626,6 +1662,21 @@ export function setupTelegramHandler(
   tgBot.on('callback_query', async (ctx) => {
     const data = 'data' in ctx.callbackQuery ? ctx.callbackQuery.data : undefined;
 
+    if (data?.startsWith('setup:')) {
+      const callbackMessage = ctx.callbackQuery.message;
+      const setupChatId = callbackMessage?.chat.id;
+      const setupThreadId = callbackMessage && 'message_thread_id' in callbackMessage
+        ? callbackMessage.message_thread_id
+        : undefined;
+      if (setupChatId === undefined) return;
+      const send = (text: string, opts?: object) => ctx.telegram.sendMessage(setupChatId, text, {
+        ...(setupThreadId !== undefined ? { message_thread_id: setupThreadId } : {}),
+        ...opts,
+      });
+      await handleSetupCallback(ctx, data, isTelegramGroupAdmin, send);
+      return;
+    }
+
     if (data?.startsWith('restart:')) {
       const [, action, ownerId] = data.split(':');
       if (String(ctx.from.id) !== ownerId || !await isTelegramGroupAdmin(ctx.from.id)) {
@@ -2142,8 +2193,9 @@ export function setupTelegramHandler(
           return;
         }
         // Snapshot the reconnectable Zalo singleton so a mid-recall reconnect
-        // can't swap it out under us.
-        const api = currentApi;
+        // can't swap it out under us. Wrapped with zaloApiWithRetry so every
+        // api.* call automatically retries on transient network errors.
+        const api = zaloApiWithRetry(currentApi);
         const { ThreadType } = await import('zca-js');
         let zaloId: string | undefined;
         let threadType: 0 | 1 = 0;
@@ -2310,6 +2362,8 @@ export function setupTelegramHandler(
   }
 
   tgBot.on('message', async (ctx) => {
+    // Set by notifyError so the outer catch below doesn't double-notify.
+    let errorNotified = false;
     try {
       const msg = ctx.message;
       if (ctx.from?.is_bot) return;
@@ -2321,14 +2375,24 @@ export function setupTelegramHandler(
         'message_thread_id' in msg ? (msg.message_thread_id as number | undefined) : undefined;
       if (!topicId) return;
 
+      // Interactive setup wizard: consume free-form env values from chat input
+      if ('text' in msg && typeof msg.text === 'string' && !msg.text.startsWith('/')) {
+        if (consumeSetupTextAndAdvance(ctx.from.id, msg.text, (text, opts) =>
+          ctx.reply(text, { message_thread_id: topicId, ...opts }))) {
+          return;
+        }
+      }
+
       // Zalo not connected yet
       if (!currentApi) {
         console.warn('[TG→Zalo] currentApi is null – Zalo not connected. Ignoring message.');
         return;
       }
 
-      // Capture api reference so closures below always use the same instance
-      const api = currentApi;
+      // Capture api reference so closures below always use the same instance.
+      // Wrapped with zaloApiWithRetry so every api.* call automatically retries
+      // on transient network errors (ETIMEDOUT, ECONNRESET, ...) before giving up.
+      const api = zaloApiWithRetry(currentApi);
 
       // Look up the corresponding Zalo conversation
       const entry = store.getEntryByTopic(topicId);
@@ -2343,13 +2407,17 @@ export function setupTelegramHandler(
 
       // Helper: send TG error notification back to the same topic
       const notifyError = async (action: string, err: unknown) => {
+        errorNotified = true;
         const errMsg = err instanceof Error ? err.message : String(err);
         const code = (err as { code?: number })?.code;
         console.error(`[TG→Zalo] ${action} failed (zaloId=${zaloId}, type=${threadType}):`, err);
 
         // Provide a friendlier explanation for common Zalo error codes
         let hint = '';
-        if (code === 114) {
+        if (isTransientNetworkError(err)) {
+          // Retries exhausted — give the user actionable context
+          hint = '\n💡 <i>Lỗi mạng tạm thời — đã thử lại 4 lần nhưng không thành công. Kiểm tra kết nối mạng.</i>';
+        } else if (code === 114) {
           hint = threadType === ThreadType.User
             ? '\n💡 <i>Zalo từ chối: chưa kết bạn hoặc người dùng đã bật giới hạn tin nhắn từ người lạ.</i>'
             : '\n💡 <i>Zalo từ chối tham số (code 114).</i>';
@@ -2463,6 +2531,7 @@ export function setupTelegramHandler(
         fileSize?: number,
         caption?: string,
         captionMentions?: Array<{ pos: number; uid: string; len: number }>,
+        forceFile = false,
       ) => {
         if (fileSize !== undefined && fileSize > TG_FILE_LIMIT) {
           await notifyTooBig(filename, fileSize);
@@ -2514,7 +2583,15 @@ export function setupTelegramHandler(
           const effectiveCaption = caption ?? '';
 
           let attachmentSource: AttachmentSource[] = [localPath];
-          if (!['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4'].includes(path.extname(filename).slice(1).toLowerCase())) {
+          const ext = path.extname(filename).slice(1).toLowerCase();
+          // zca-js classifies attachments purely by extension: jpg/jpeg/png/webp
+          // always upload as photos (and need path-based dimension probing), gif
+          // is special-cased — those stay path-based even for "send as file".
+          // mp4 documents are steered into the generic file path when forceFile
+          // is set, so Zalo keeps the clean original filename instead of the
+          // bridge's temp-file prefix, and the file downloads as a document.
+          const canForceFile = ext === 'mp4';
+          if (!['jpg', 'jpeg', 'png', 'webp', 'gif', 'mp4'].includes(ext) || (forceFile && canForceFile)) {
             const fileBuffer = await readFile(localPath);
             attachmentSource = [{
               data: fileBuffer,
@@ -2787,7 +2864,22 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
         const doc   = msg.document;
         const fname = doc.file_name ?? `file_${Date.now()}.bin`;
         const { cap, capMentions } = getCaptionMentions();
-        await sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions);
+        // Sent "as file" on Telegram → keep it a file on Zalo (forceFile):
+        // mp4 keeps its original filename instead of playing inline under the
+        // bridge's temp name. jpg/png still render as photos — zca-js (and the
+        // Zalo Web API underneath) classifies image extensions unconditionally.
+        await sendAttachment(doc.file_id, fname, doc.file_size, cap, capMentions, true);
+        return;
+      }
+
+      if ('audio' in msg && msg.audio) {
+        // Telegram music/audio uploads (mp3, flac, wav, m4r, …) arrive as
+        // msg.audio — not msg.voice and not msg.document — and used to fall
+        // through unhandled, silently dropping the message (issue #65).
+        const aud   = msg.audio;
+        const fname = aud.file_name ?? `audio_${Date.now()}.mp3`;
+        const { cap, capMentions } = getCaptionMentions();
+        await sendAttachment(aud.file_id, fname, aud.file_size, cap, capMentions);
         return;
       }
 
@@ -3198,6 +3290,23 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
       }
     } catch (err) {
       console.error('[TG→Zalo] Error:', err);
+      // Surface unhandled send failures to the user instead of silently dropping
+      // the message (issue #65). Inner handlers that already notified set
+      // errorNotified so we don't send a second warning for the same message.
+      if (!errorNotified) {
+        const failedTopicId =
+          ctx.message && 'message_thread_id' in ctx.message
+            ? (ctx.message.message_thread_id as number | undefined)
+            : undefined;
+        if (failedTopicId) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          await tgBot.telegram.sendMessage(
+            config.telegram.groupId,
+            `⚠️ Gửi thất bại: <b>gửi sang Zalo</b>\n<code>${escapeHtml(errMsg)}</code>`,
+            { message_thread_id: failedTopicId, parse_mode: 'HTML' },
+          ).catch(() => undefined);
+        }
+      }
     }
   });
 
@@ -3272,7 +3381,7 @@ sentMsgStore.save(msg.message_id, { msgIds: [zaloMsgId], zaloId, threadType });
       }
 
       if (!currentApi) return;
-      const api = currentApi;
+      const api = zaloApiWithRetry(currentApi);
 
       // Map TG 0-based option indices → Zalo option_ids
       const optionIds = answer.option_ids

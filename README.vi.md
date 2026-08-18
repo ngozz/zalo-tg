@@ -93,6 +93,11 @@ TG_TOKEN=123456:telegram-bot-token
 TG_GROUP_ID=-1001234567890
 ```
 
+Tất cả biến còn lại có thể cấu hình trực tiếp qua bot: chỉ cần điền 2 biến trên,
+gửi `/setup` trong group bridge (chỉ admin) — wizard sẽ hỏi lần lượt từng biến tuỳ chọn,
+dùng nút inline cho biến boolean và nhập tin nhắn cho biến dạng văn bản, sau đó tự ghi
+kết quả vào `.env` (áp dụng bằng `/restart`, dùng Docker thì cập nhật thêm trong compose).
+
 Copy [.env.example](.env.example) để có template đầy đủ. Bảng config đầy đủ:
 
 | Biến | Mặc định / ví dụ | Nơi dùng | Công dụng |
@@ -103,6 +108,8 @@ Copy [.env.example](.env.example) để có template đầy đủ. Bảng config
 | `ZALO_CREDENTIALS_PATH` | `./credentials.json` | app | File credentials Zalo được ghi sau QR login. Không commit file này. |
 | `ZALO_SKIP_MUTED_GROUPS` | `0` | app | `1` bỏ qua hoàn toàn tin từ nhóm Zalo đã mute. |
 | `ZALO_MUTE_SILENT` | `1` | app | `1` mirror thread Zalo đã mute thành tin Telegram silent; `0` luôn notify. |
+| `ZALO_DM_NATIVE_REACTION` | `1` | app | `1` hiển thị cảm xúc Zalo ở DM dạng native reaction trên tin nhắn; `0` luôn dùng reply tổng hợp `❤️ Tên` như nhóm. |
+| `ZALO_EXCLUDE_THREADS` | trống | app | Danh sách thread không mirror, phân tách bằng dấu phẩy: `type:id` (type `0`=DM, `1`=nhóm); id trần được coi là nhóm. Tin nhắn, cảm xúc, thu hồi từ thread bị loại sẽ bị bỏ qua hoàn toàn. |
 | `LOCAL_BOT_API` | `0` | app | `1` gửi request Telegram Bot API qua `TG_LOCAL_SERVER`; `0` dùng official `api.telegram.org`. |
 | `TG_LOCAL_SERVER` | `http://127.0.0.1:8081` | app / Compose override | Endpoint Local Bot API. Chỉ bắt buộc khi `LOCAL_BOT_API=1`; Compose override thành `http://telegram-bot-api:8081`. |
 | `TG_API_ID` | rỗng | Docker Compose | Telegram API ID cho container `telegram-bot-api`; lấy tại my.telegram.org. |

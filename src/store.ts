@@ -14,6 +14,36 @@ export function markRecalled(msgId: string): void {
   setTimeout(() => recentlyRecalledMsgIds.delete(msgId), 5_000);
 }
 
+/**
+ * Track Zalo message IDs whose recall was already notified to Telegram.
+ *
+ * After a reconnect, the catch-up sync (requestOldMessages) replays undo
+ * events that were already delivered live — without this dedupe the same
+ * "🗑 đã thu hồi" notice is sent again (issue #65). A Zalo message can only
+ * be recalled once, so entries never expire; the set is bounded FIFO.
+ */
+const RECALL_NOTIFIED_MAX = 20_000;
+const _recallNotifiedMsgIds = new Set<string>();
+export const recallNotifiedStore = {
+  /** Returns true (and marks) if this recall was NOT notified before. */
+  markIfFirst(msgId: string): boolean {
+    if (_recallNotifiedMsgIds.has(msgId)) return false;
+    if (_recallNotifiedMsgIds.size >= RECALL_NOTIFIED_MAX) {
+      const oldest = _recallNotifiedMsgIds.values().next().value as string | undefined;
+      if (oldest !== undefined) _recallNotifiedMsgIds.delete(oldest);
+    }
+    _recallNotifiedMsgIds.add(msgId);
+    return true;
+  },
+  /** Unmark (e.g. when the notification send failed and may be retried). */
+  unmark(msgId: string): void {
+    _recallNotifiedMsgIds.delete(msgId);
+  },
+  stats(): { entries: number } {
+    return { entries: _recallNotifiedMsgIds.size };
+  },
+};
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface TopicEntry {
@@ -846,8 +876,9 @@ export const sentMsgStore = {
 export interface ReactionSummaryEntry {
   summaryTgMsgId: number | null;
   lastSentText: string;
-  /** emoji → actor display names (ordered by arrival) */
-  reactions: Record<string, string[]>;
+  /** emoji → actor display name → count (Zalo lets one person drop the same
+   *  icon multiple times; total is a real number, e.g. ❤️ ×3) */
+  reactions: Record<string, Record<string, number>>;
   debounceTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -869,10 +900,8 @@ export const reactionSummaryStore = {
       entry = { summaryTgMsgId: null, lastSentText: '', reactions: {}, debounceTimer: null };
       _reactionSummaries.set(tgMsgId, entry);
     }
-    if (!entry.reactions[emoji]) entry.reactions[emoji] = [];
-    if (!entry.reactions[emoji]!.includes(actorName)) {
-      entry.reactions[emoji]!.push(actorName);
-    }
+    if (!entry.reactions[emoji]) entry.reactions[emoji] = {};
+    entry.reactions[emoji]![actorName] = (entry.reactions[emoji]![actorName] ?? 0) + 1;
     return entry;
   },
 
@@ -886,10 +915,13 @@ export const reactionSummaryStore = {
   },
 
   buildText(entry: ReactionSummaryEntry): string {
-    return Object.entries(entry.reactions)
-      .filter(([, names]) => names.length > 0)
-      .map(([emoji, names]) => `${emoji} ${names.join(', ')}`)
-      .join('  ');
+    const parts: string[] = [];
+    for (const [emoji, actors] of Object.entries(entry.reactions)) {
+      for (const [name, count] of Object.entries(actors)) {
+        parts.push(count > 1 ? `${emoji} ×${count} ${name}` : `${emoji} ${name}`);
+      }
+    }
+    return parts.join('  ');
   },
 };
 
@@ -944,7 +976,20 @@ export const reactionEchoStore = {
 
 const REACTION_EVENT_DEDUPE_TTL_MS = 15_000;
 const REACTION_EVENT_DEDUPE_MAX = 20_000;
+const REACTION_ACTION_MAX = 50_000;
 const _recentReactionEvents = new Map<string, number>();
+const _seenReactionActions = new Set<string>();
+
+/** Long-lived dedupe for reaction actionIds: unique per action, never expires. */
+function markReactionAction(actionId: string): boolean {
+  if (_seenReactionActions.has(actionId)) return true;
+  if (_seenReactionActions.size >= REACTION_ACTION_MAX) {
+    const oldest = _seenReactionActions.values().next().value as string | undefined;
+    if (oldest !== undefined) _seenReactionActions.delete(oldest);
+  }
+  _seenReactionActions.add(actionId);
+  return false;
+}
 
 function pruneRecentReactionEvents(now = Date.now()): void {
   for (const [key, ts] of _recentReactionEvents) {
@@ -983,7 +1028,16 @@ export const reactionEventDedupeStore = {
     icon: string;
     actorUid?: string;
     actorName?: string;
+    actionId?: string;
   }): boolean {
+    // Prefer the server-generated actionId: it is unique per reaction *action*,
+    // so repeated identical taps (the same person dropping ❤️ several times)
+    // are kept and counted, while re-emits/replays of the SAME action (even
+    // long after the live event, e.g. reconnect catch-up) are deduped (issue
+    // #65). The set never expires because an actionId can only occur once.
+    if (input.actionId?.trim()) {
+      return markReactionAction(input.actionId.trim());
+    }
     const targetKey = normalizeReactionMsgIds(input.targetMsgIds).join('|');
     if (!targetKey) return false;
     const actorKey = input.actorUid?.trim()
