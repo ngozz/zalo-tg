@@ -41,7 +41,14 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
 
   // Local Bot API server returns file:// paths — copy directly, no HTTP needed
   if (url.startsWith('file:')) {
-    const srcPath = fileURLToPath(url);
+    let srcPath: string;
+    try {
+      srcPath = fileURLToPath(url);
+    } catch {
+      // Telegraf preserves custom apiRoot hostname in file:// URLs (e.g. file://telegram-bot-api/...),
+      // which fileURLToPath rejects on POSIX. Normalize to file:/// (empty host) and retry.
+      srcPath = fileURLToPath(url.replace(/^file:\/\/[^\/]+/, 'file://'));
+    }
     const baseName = sanitizeFileName(fileName ?? path.basename(srcPath));
     const destPath = path.join(TMP_DIR, `${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${baseName}`);
     try {
@@ -54,6 +61,13 @@ export async function downloadToTemp(url: string, fileName?: string, retries = 3
         throw new Error(
           `Local Bot API file is not visible to the bridge: ${srcPath}. `
           + 'Mount TELEGRAM_WORK_DIR at the same absolute path in both processes.',
+          { cause: err },
+        );
+      }
+      if (code === 'EACCES') {
+        throw new Error(
+          `Local Bot API file cannot be read due to permissions: ${srcPath}. `
+          + 'Ensure the bridge container has read permissions (e.g. group_add: ["101"]).',
           { cause: err },
         );
       }
@@ -363,34 +377,69 @@ export async function convertTgsToGif(inputPath: string): Promise<string> {
 
   const { createCanvas, GifDisposal, GifEncoder, LottieAnimation } = await import('@napi-rs/canvas');
   const animation = LottieAnimation.loadFromData(animationData);
-  const width = Math.round(animation.width);
-  const height = Math.round(animation.height);
-  const frameCount = Math.max(1, Math.round(animation.frames));
-  const fps = Number.isFinite(animation.fps) && animation.fps > 0 ? animation.fps : 30;
-  if (width < 1 || height < 1) throw new Error('TGS animation has invalid dimensions');
-  if (frameCount > 600) throw new Error(`TGS animation has too many frames: ${frameCount}`);
+  const sourceWidth = Math.round(animation.width);
+  const sourceHeight = Math.round(animation.height);
+  const sourceFrames = Math.max(1, Math.round(animation.frames));
+  const sourceFps = Number.isFinite(animation.fps) && animation.fps > 0 ? animation.fps : 30;
+  if (sourceWidth < 1 || sourceHeight < 1) throw new Error('TGS animation has invalid dimensions');
+  if (sourceFrames > 600) throw new Error(`TGS animation has too many frames: ${sourceFrames}`);
 
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  const encoder = new GifEncoder(width, height, { repeat: 0, quality: 5 });
-  const delay = Math.max(20, Math.round(1_000 / fps));
-  try {
-    for (let frame = 0; frame < frameCount; frame++) {
-      ctx.clearRect(0, 0, width, height);
-      animation.seekFrame(frame);
-      animation.render(ctx);
-      const rgba = ctx.getImageData(0, 0, width, height).data;
-      encoder.addFrame(new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height, {
-        delay,
-        disposal: GifDisposal.Background,
-      });
+  const sourceCanvas = createCanvas(sourceWidth, sourceHeight);
+  const sourceCtx = sourceCanvas.getContext('2d');
+
+  // Zalo's GIF flow uploads the whole file as the thumbnail and rejects
+  // anything over 10 MB. Shrink and subsample so busy stickers stay under it.
+  const sizeLimit = 9_500_000;
+  const profiles = [
+    { maxSide: 512, fps: 30, maxFrames: 180 },
+    { maxSide: 448, fps: 24, maxFrames: 150 },
+    { maxSide: 384, fps: 20, maxFrames: 120 },
+    { maxSide: 320, fps: 16, maxFrames: 100 },
+    { maxSide: 256, fps: 12, maxFrames: 80 },
+    { maxSide: 192, fps: 10, maxFrames: 60 },
+  ];
+
+  for (const [index, profile] of profiles.entries()) {
+    const scale = Math.min(1, profile.maxSide / Math.max(sourceWidth, sourceHeight));
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    let step = Math.max(1, Math.round(sourceFps / profile.fps));
+    if (Math.ceil(sourceFrames / step) > profile.maxFrames) {
+      step = Math.ceil(sourceFrames / profile.maxFrames);
     }
-    const outputPath = uniqueTempName('telegram_sticker', '.gif');
-    await writeFile(outputPath, encoder.finish());
-    return outputPath;
-  } finally {
-    encoder.dispose();
+    const delay = Math.max(20, Math.round((1_000 * step) / sourceFps));
+
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    const encoder = new GifEncoder(width, height, { repeat: 0, quality: 5 });
+    try {
+      for (let frame = 0; frame < sourceFrames; frame += step) {
+        sourceCtx.clearRect(0, 0, sourceWidth, sourceHeight);
+        animation.seekFrame(frame);
+        animation.render(sourceCtx);
+        // @napi-rs/canvas 1.0.x returns all-zero pixels from getImageData()
+        // after LottieAnimation.render() on the same canvas; drawing it into a
+        // second canvas first makes the rendered pixels readable.
+        ctx.clearRect(0, 0, width, height);
+        ctx.drawImage(sourceCanvas, 0, 0, width, height);
+        const rgba = ctx.getImageData(0, 0, width, height).data;
+        encoder.addFrame(new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height, {
+          delay,
+          disposal: GifDisposal.Background,
+        });
+      }
+      const gif = encoder.finish();
+      if (gif.length <= sizeLimit || index === profiles.length - 1) {
+        const outputPath = uniqueTempName('telegram_sticker', '.gif');
+        await writeFile(outputPath, gif);
+        return outputPath;
+      }
+      console.warn(`[media] TGS GIF ${width}x${height} is ${gif.length} bytes; retrying smaller`);
+    } finally {
+      encoder.dispose();
+    }
   }
+  throw new Error('TGS animation could not be encoded under the upload limit');
 }
 
 /**
